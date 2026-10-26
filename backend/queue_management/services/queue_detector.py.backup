@@ -1,0 +1,82 @@
+import cv2
+
+
+class QueueDetector:
+    """Estimate foreground regions; detections are not verified people."""
+
+    def __init__(
+        self,
+        min_contour_area=2000,
+        history=500,
+        threshold=25,
+        min_box_width=20,
+        min_box_height=40,
+    ):
+        self.min_contour_area = min_contour_area
+        self.min_box_width = min_box_width
+        self.min_box_height = min_box_height
+        self.background_subtractor = cv2.createBackgroundSubtractorMOG2(
+            history=history,
+            varThreshold=threshold,
+            detectShadows=True,
+        )
+        self.warmup_frames = 0
+        self.required_warmup_frames = 30
+
+    def detect(self, frame, roi):
+        """Analyze ROI (x, y, width, height) using foreground contours."""
+        if frame is None or frame.size == 0:
+            raise ValueError("Frame is empty or invalid.")
+
+        x, y, width, height = roi
+        frame_height, frame_width = frame.shape[:2]
+
+        if x < 0 or y < 0 or width <= 0 or height <= 0:
+            raise ValueError("ROI coordinates and dimensions must be positive.")
+        if x + width > frame_width or y + height > frame_height:
+            raise ValueError("ROI extends outside the frame.")
+
+        region = frame[y:y + height, x:x + width]
+        mask = self.background_subtractor.apply(region)
+        self.warmup_frames += 1
+
+        if self.warmup_frames <= self.required_warmup_frames:
+            return {
+                "occupancy_estimate": None,
+                "valid": False,
+                "status": "warming_up",
+                "method": "foreground_contours",
+                "detections": [],
+            }
+
+        mask = cv2.medianBlur(mask, 5)
+        _, mask = cv2.threshold(mask, 200, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        detections = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < self.min_contour_area:
+                continue
+
+            bx, by, bw, bh = cv2.boundingRect(contour)
+            if bw < self.min_box_width or bh < self.min_box_height:
+                continue
+
+            detections.append({
+                "x": x + bx,
+                "y": y + by,
+                "width": bw,
+                "height": bh,
+                "area": float(area),
+            })
+
+        return {
+            "occupancy_estimate": len(detections),
+            "valid": True,
+            "status": "foreground_contours",
+            "method": "foreground_contours",
+            "detections": detections,
+        }

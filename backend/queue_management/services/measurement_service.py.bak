@@ -1,0 +1,142 @@
+
+from pathlib import Path
+
+from django.conf import settings
+from django.utils import timezone
+
+from queue_management.models import Alert, QueueMeasurement, VideoSource
+from queue_management.services.queue_detector import QueueDetector
+from queue_management.services.video_processor import VideoProcessor
+
+
+class MeasurementService:
+    """Process video and alert when detected people exceed the counter threshold."""
+
+    def __init__(
+        self,
+        source_id,
+        roi=None,
+        frame_interval=10,
+        alert_threshold=3,
+    ):
+        self.source_id = source_id
+        self.roi = roi
+        self.frame_interval = max(1, frame_interval)
+        self.alert_threshold = max(1, alert_threshold)
+
+    def process_video(self):
+        source = VideoSource.objects.get(id=self.source_id)
+
+        if source.source_type != "VIDEO_FILE":
+            raise ValueError(
+                "This service currently supports recorded video files only."
+            )
+
+        video_path = Path(source.source_path)
+        if not video_path.is_absolute():
+            video_path = (Path(settings.BASE_DIR).parent / video_path).resolve()
+
+        if not video_path.is_file():
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+
+        saved_count = 0
+        alerts_created = 0
+        frame_number = 0
+        detector = QueueDetector()
+
+        try:
+            with VideoProcessor(str(video_path)) as processor:
+                while True:
+                    frame = processor.read_frame()
+                    if frame is None:
+                        break
+
+                    frame_number += 1
+
+                    if frame_number % self.frame_interval != 0:
+                        continue
+
+                    height, width = frame.shape[:2]
+
+                    # Configure this ROI to cover the counter/queue area.
+                    roi = self.roi or (250, 200, 650, 750)
+
+                    result = detector.detect(frame, roi)
+                    estimate = result["occupancy_estimate"]
+                    measured_at = timezone.now()
+
+                    QueueMeasurement.objects.create(
+                        video_source=source,
+                        occupancy_estimate=estimate,
+                        is_valid=True,
+                        status="yolo_person_detection",
+                        measured_at=measured_at,
+                    )
+                    saved_count += 1
+
+                    active_alerts = Alert.objects.filter(
+                        video_source=source,
+                        alert_type=Alert.AlertType.HIGH_QUEUE,
+                        status=Alert.Status.ACTIVE,
+                    )
+
+                    if estimate >= self.alert_threshold:
+                        existing_alert = active_alerts.first()
+
+                        severity = (
+                            Alert.Severity.CRITICAL
+                            if estimate >= self.alert_threshold * 2
+                            else Alert.Severity.WARNING
+                        )
+
+                        if existing_alert is None:
+                            Alert.objects.create(
+                                video_source=source,
+                                alert_type=Alert.AlertType.HIGH_QUEUE,
+                                severity=severity,
+                                queue_count=estimate,
+                                threshold=self.alert_threshold,
+                                status=Alert.Status.ACTIVE,
+                                reason=(
+                                    "YOLO detected the configured number of "
+                                    "people in the counter region."
+                                ),
+                                recommended_action=(
+                                    "Review the counter queue and consider "
+                                    "opening another service counter."
+                                ),
+                                triggered_at=measured_at,
+                            )
+                            alerts_created += 1
+                        else:
+                            existing_alert.queue_count = estimate
+                            existing_alert.threshold = self.alert_threshold
+                            existing_alert.severity = severity
+                            existing_alert.save(
+                                update_fields=[
+                                    "queue_count",
+                                    "threshold",
+                                    "severity",
+                                ]
+                            )
+                    else:
+                        active_alerts.update(
+                            status=Alert.Status.RESOLVED,
+                            resolved_at=measured_at,
+                        )
+
+        finally:
+            del detector
+
+        return {
+            "video_source": source.name,
+            "frames_processed": frame_number,
+            "measurements_saved": saved_count,
+            "alerts_created": alerts_created,
+            "alert_threshold": self.alert_threshold,
+            "note": (
+                "Counts are YOLO person detections inside the configured ROI; "
+                "they are not unique customer tracks."
+            ),
+        }
+

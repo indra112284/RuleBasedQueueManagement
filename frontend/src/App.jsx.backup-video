@@ -1,0 +1,165 @@
+﻿import { useEffect, useState } from 'react'
+import './App.css'
+
+const API_URL = 'http://127.0.0.1:8000/api/overview/'
+
+const navigation = [
+  { title: 'Overview', icon: 'O', active: true },
+  { title: 'Camera Monitoring', icon: 'C' },
+  { title: 'Customer Tracking', icon: 'T' },
+  { title: 'Counter Interactions', icon: 'I' },
+  { title: 'Alert History', icon: 'A' },
+  { title: 'Settings', icon: 'S' },
+]
+
+function App() {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadDashboard() {
+      try {
+        const response = await fetch(API_URL)
+        if (!response.ok) throw new Error(`Django returned HTTP ${response.status}`)
+        const result = await response.json()
+        if (!cancelled) {
+          setData(result)
+          setError('')
+        }
+      } catch (err) {
+        if (!cancelled) setError(err.message || 'Could not connect to Django')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+
+    loadDashboard()
+    const intervalId = window.setInterval(loadDashboard, 10000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+  }, [])
+
+  const sources = data?.video_sources ?? []
+  const measurements = data?.recent_measurements ?? []
+  const alerts = data?.recent_alerts ?? []
+  const counters = data?.counters ?? []
+  const latestMeasurement = measurements.find(item => item.is_valid) ?? null
+  const activeAlerts = alerts.filter(item => item.status === 'ACTIVE').length
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">Q</div>
+          <div><h2>QueueWatch</h2><p>Queue Management</p></div>
+        </div>
+        <div className="nav-label">WORKSPACE</div>
+        <nav className="navigation">
+          {navigation.map(item => (
+            <button key={item.title} className={`nav-item ${item.active ? 'active' : ''}`} type="button">
+              <span className="nav-icon">{item.icon}</span><span>{item.title}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-bottom">
+          <div className="system-indicator"><span /> {error ? 'Backend connection failed' : loading ? 'Connecting to backend' : 'Dashboard API connected'}</div>
+          <div className="profile">
+            <div className="avatar">U</div>
+            <div><strong>Current User</strong><p>Role not connected</p></div>
+          </div>
+        </div>
+      </aside>
+
+      <main className="main-content">
+        <header className="topbar">
+          <div className="breadcrumb">Workspace / Overview</div>
+          <div className="topbar-right">
+            <span className="connection-status"><span /> {error ? 'Backend not connected' : loading ? 'Connecting...' : 'Backend connected'}</span>
+            <button className="user-button" type="button">User account</button>
+          </div>
+        </header>
+
+        <section className="page-content">
+          <div className="page-heading">
+            <div>
+              <p className="eyebrow">QUEUE OPERATIONS</p>
+              <h1>Dashboard Overview</h1>
+              <p className="page-description">Monitor camera sources, foreground-contour estimates, and alerts. Contour estimates are not verified customer counts.</p>
+            </div>
+            <div className="date-chip">{loading ? 'Loading data...' : error ? 'Connection unavailable' : 'Data refreshes every 10 seconds'}</div>
+          </div>
+
+          {error && <div className="notice"><span className="notice-icon">!</span><div><strong>Unable to load dashboard data</strong><p>{error}. Make sure Django is running at 127.0.0.1:8000.</p></div></div>}
+          {!error && !loading && <div className="notice"><span className="notice-icon">i</span><div><strong>Live database connection</strong><p>Dashboard information comes from your Django API. Queue estimates appear only when measurements have been saved.</p></div></div>}
+
+          <div className="section-heading">
+            <div><h2>System summary</h2><p>Values loaded from the Django database.</p></div>
+          </div>
+
+          <div className="summary-grid">
+            <SummaryCard icon="C" label="Camera sources" value={loading ? '...' : sources.length} detail={`${sources.filter(item => item.is_active).length} active sources`} tone="blue" />
+            <SummaryCard icon="Q" label="Latest unverified contour estimate" value={latestMeasurement ? latestMeasurement.occupancy_estimate ?? '-' : '-'} detail={latestMeasurement ? "Not a verified customer count" : "No measurement saved"} tone="purple" />
+            <SummaryCard icon="A" label="Active alerts" value={loading ? '...' : activeAlerts} detail={`${alerts.length} recent alerts returned`} tone="orange" />
+            <SummaryCard icon="M" label="Detector-valid measurements" value={loading ? '...' : measurements.filter(item => item.is_valid).length} detail="Among the 10 latest records" tone="green" />
+          </div>
+
+          <div className="content-grid">
+            <section className="panel">
+              <div className="panel-heading"><div><h2>Camera monitoring</h2><p>Registered video sources and status</p></div><span className="muted-tag">{sources.length} sources</span></div>
+              {loading ? <EmptyState title="Loading video sources" description="Requesting data from Django." /> : sources.length === 0 ? <EmptyState title="No video sources registered" description="Register a video source in Django Admin." /> : (
+                <div className="table-wrap"><table><thead><tr><th>VIDEO SOURCE</th><th>TYPE</th><th>STATUS</th></tr></thead><tbody>
+                  {sources.map(source => <tr key={source.id}><td>{source.name}</td><td>{source.source_type === 'VIDEO_FILE' ? 'Recorded video' : source.source_type}</td><td><span className={`status-pill ${source.is_active ? 'status-active' : 'status-inactive'}`}>{source.is_active ? 'Active' : 'Inactive'}</span></td></tr>)}
+                </tbody></table></div>
+              )}
+            </section>
+
+            <section className="panel">
+              <div className="panel-heading"><div><h2>Recent alerts</h2><p>Queue threshold notifications</p></div><span className="muted-tag">{alerts.length} alerts</span></div>
+              {loading ? <EmptyState title="Loading alerts" description="Requesting alert history from Django." /> : alerts.length === 0 ? <EmptyState title="No saved alerts" description="No alert records were returned by the API." /> : (
+                <div className="table-wrap"><table><thead><tr><th>SOURCE</th><th>QUEUE</th><th>STATUS</th></tr></thead><tbody>
+                  {alerts.map(alert => <tr key={alert.id}><td>{alert.video_source_name}</td><td>{alert.queue_count} / {alert.threshold}</td><td>{alert.status}</td></tr>)}
+                </tbody></table></div>
+              )}
+            </section>
+          </div>
+
+          <section className="panel activity-panel">
+            <div className="panel-heading"><div><h2>Recent queue measurements</h2><p>Latest records saved in the database</p></div><span className="muted-tag">{measurements.length} records</span></div>
+            {loading ? <EmptyState title="Loading measurements" description="Requesting queue history from Django." /> : measurements.length === 0 ? <EmptyState title="No saved measurements" description="The API currently returned no measurement records. Processing a video does not automatically save measurements yet." /> : (
+              <div className="table-wrap"><table><thead><tr><th>VIDEO SOURCE</th><th>ESTIMATE</th><th>DETECTOR CHECK</th><th>MEASUREMENT STATUS</th><th>MEASURED AT</th></tr></thead><tbody>
+                {measurements.map(item => <tr key={item.id}><td>{item.video_source_name}</td><td>{item.occupancy_estimate ?? '-'}</td><td>{item.is_valid ? 'Passed detector checks' : 'Not valid'}</td><td>{item.status}</td><td>{new Date(item.measured_at).toLocaleString()}</td></tr>)}
+              </tbody></table></div>
+            )}
+          </section>
+
+          <section className="panel activity-panel">
+            <div className="panel-heading"><div><h2>Counters</h2><p>Registered counter status</p></div><span className="muted-tag">{counters.length} counters</span></div>
+            {loading ? <EmptyState title="Loading counters" description="Requesting counter records." /> : counters.length === 0 ? <EmptyState title="No counters registered" description="Create a counter in Django Admin if your setup requires one." /> : (
+              <div className="table-wrap"><table><thead><tr><th>COUNTER</th><th>STATUS</th></tr></thead><tbody>
+                {counters.map(counter => <tr key={counter.id}><td>{counter.name}</td><td>{counter.status}</td></tr>)}
+              </tbody></table></div>
+            )}
+          </section>
+
+          <footer className="footer"><span>QueueWatch - Rule-Based Queue Management</span><span>Conventional computer vision - No AI/ML models</span></footer>
+        </section>
+      </main>
+    </div>
+  )
+}
+
+function SummaryCard({ icon, label, value, detail, tone }) {
+  return <article className="summary-card"><div className={`summary-icon ${tone}`}>{icon}</div><p className="summary-label">{label}</p><div className="summary-value">{value}</div><p className="summary-detail">{detail}</p></article>
+}
+
+function EmptyState({ title, description }) {
+  return <div className="empty-state"><div className="empty-icon">i</div><h3>{title}</h3><p>{description}</p></div>
+}
+
+export default App

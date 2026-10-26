@@ -1,0 +1,6 @@
+﻿Django==6.1.2
+django-cors-headers==4.9.0
+djangorestframework==3.18.3
+python-dotenv==1.2.4
+ultralytics==8.4.189
+opencv-python==5.0.0.93
